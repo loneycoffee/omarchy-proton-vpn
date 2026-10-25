@@ -21,6 +21,9 @@ Item {
   property string omarchyPath: ""
 
   readonly property string ctl: Qt.resolvedUrl("bin/pvpn").toString().replace(/^file:\/\//, "")
+  // Bundled, as a path: icon-theme names vary between themes, and one the
+  // notification popup cannot find shows up as a checkerboard.
+  readonly property string iconDir: Qt.resolvedUrl("icons").toString().replace(/^file:\/\//, "")
   readonly property string omarchyBin: (root.omarchyPath || Quickshell.env("OMARCHY_PATH") || "/usr/share/omarchy") + "/bin"
 
   property var state: ({ installed: true, connected: false, connecting: false, server: "", country: "" })
@@ -97,8 +100,8 @@ Item {
     signinWatch.restart()
   }
 
-  function notify(summary, body) {
-    Quickshell.execDetached(["notify-send", "-a", "Proton VPN", "-i", "network-vpn", summary, body || ""])
+  function notify(summary, body, icon) {
+    Quickshell.execDetached(["notify-send", "-a", "Proton VPN", "-i", root.iconDir + "/" + icon + ".svg", summary, body || ""])
   }
 
   function parse(text, fallback) {
@@ -124,8 +127,8 @@ Item {
           root._wasConnected = next.connected === true
           // Not on startup: only a change seen while running is news.
           if (root._announced) {
-            if (next.connected) root.notify("Connected", next.server)
-            else root.notify("Disconnected", "Your traffic no longer goes through Proton VPN")
+            if (next.connected) root.notify("Connected", next.server, "connected")
+            else root.notify("Disconnected", "Your traffic no longer goes through Proton VPN", "disconnected")
           }
           root.refreshDetails()
         }
