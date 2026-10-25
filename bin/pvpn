@@ -129,7 +129,8 @@ def details():
         loc = f_loc.result()
     account = ""
     match = re.search(r"Account:\s*'([^']*)'", info_out)
-    if info_rc == 0 and match:
+    # Signed out, the CLI still exits 0 and names the account 'None'.
+    if info_rc == 0 and match and match.group(1) not in ("", "None"):
         account = match.group(1)
     out = {"installed": bool(shutil.which("protonvpn")), "signedIn": account != "", "account": account,
            "exit": loc, "settings": parse_settings(config_out) if config_rc == 0 else {}}
