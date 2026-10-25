@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""pvpn - the glue between the Proton VPN bar panel and the official CLI.
+
+  pvpn state                 JSON: is a Proton VPN tunnel up, and to which server
+  pvpn details               JSON: account, load, protocol, settings, exit IP
+  pvpn countries             JSON: every country with servers (cached for a day)
+  pvpn connect [ARGS...]     protonvpn connect ARGS..., as JSON {ok, message}
+  pvpn disconnect            protonvpn disconnect, as JSON {ok, message}
+  pvpn set FEATURE VALUE     protonvpn config set FEATURE VALUE, as JSON
+  pvpn signin                interactive: ask for the username, then sign in
+
+`state` only asks NetworkManager, so it is cheap enough to run on every change
+`nmcli monitor` reports. The CLI names its connections "ProtonVPN <server>" on
+the proton0 device; that is what is looked for.
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "omarchy/plugins/proton-vpn")
+SERVER_RE = re.compile(r"\b([A-Z]{2}(?:-[A-Z]{2})?#\d+)\b")
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def emit(value):
+    json.dump(value, sys.stdout)
+    sys.stdout.write("\n")
+
+
+def cli(*args, timeout=60):
+    if not shutil.which("protonvpn"):
+        return 127, "protonvpn is not installed (omarchy pkg add proton-vpn-cli)"
+    try:
+        proc = subprocess.run(["protonvpn", *args], capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return 124, "protonvpn timed out"
+    out = ANSI_RE.sub("", (proc.stdout + "\n" + proc.stderr)).strip()
+    return proc.returncode, out
+
+
+def tidy(message):
+    # Click prints "Usage: ..." blocks and "Error: ..." prefixes; keep the sentence.
+    lines = [l.strip() for l in message.splitlines() if l.strip()]
+    lines = [l for l in lines if not l.startswith(("Usage:", "Try '"))]
+    text = " ".join(lines)
+    return re.sub(r"^Error:\s*", "", text)
+
+
+def state():
+    out = {"installed": bool(shutil.which("protonvpn")), "connected": False, "connecting": False,
+           "server": "", "country": "", "device": ""}
+    try:
+        proc = subprocess.run(["nmcli", "-t", "-f", "NAME,DEVICE,STATE", "connection", "show", "--active"],
+                              capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return out
+    for line in proc.stdout.splitlines():
+        # nmcli -t escapes ':' inside fields as '\:'.
+        parts = re.split(r"(?<!\\):", line)
+        if len(parts) < 3:
+            continue
+        name, device, st = (p.replace("\\:", ":") for p in parts[:3])
+        if not name.startswith("ProtonVPN") and device != "proton0":
+            continue
+        match = SERVER_RE.search(name)
+        out["server"] = match.group(1) if match else name.replace("ProtonVPN", "").strip()
+        out["country"] = out["server"][:2] if match else ""
+        out["device"] = device
+        out["connected"] = st == "activated"
+        out["connecting"] = st == "activating"
+        break
+    return out
+
+
+def location():
+    try:
+        req = urllib.request.Request("https://api.protonvpn.ch/vpn/location",
+                                     headers={"User-Agent": "omarchy-proton-vpn"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.load(resp)
+        return {"ip": data.get("IP", ""), "country": data.get("Country", ""), "isp": data.get("ISP", "")}
+    except Exception:
+        return {"ip": "", "country": "", "isp": ""}
+
+
+def parse_status(text):
+    info = {}
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "server":
+            server, _, where = value.partition(" in ")
+            info["server"] = server.strip()
+            info["location"] = where.strip()
+        elif key == "load":
+            info["load"] = value.rstrip("%")
+        elif key == "protocol":
+            info["protocol"] = value
+    return info
+
+
+def parse_settings(text):
+    settings = {}
+    for line in text.splitlines():
+        cols = re.split(r"\s{2,}", line.strip())
+        if len(cols) == 2 and cols[0] not in ("Setting",) and not cols[0].startswith("-"):
+            settings[cols[0]] = cols[1]
+    return settings
+
+
+def details():
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        f_info = pool.submit(cli, "info", timeout=30)
+        f_status = pool.submit(cli, "status", timeout=30)
+        f_config = pool.submit(cli, "config", "list", timeout=30)
+        f_loc = pool.submit(location)
+        info_rc, info_out = f_info.result()
+        status_rc, status_out = f_status.result()
+        config_rc, config_out = f_config.result()
+        loc = f_loc.result()
+    account = ""
+    match = re.search(r"Account:\s*'([^']*)'", info_out)
+    if info_rc == 0 and match:
+        account = match.group(1)
+    out = {"installed": bool(shutil.which("protonvpn")), "signedIn": account != "", "account": account,
+           "exit": loc, "settings": parse_settings(config_out) if config_rc == 0 else {}}
+    if status_rc == 0:
+        out.update(parse_status(status_out))
+    return out
+
+
+def countries():
+    path = os.path.join(CACHE, "countries.json")
+    try:
+        if time.time() - os.path.getmtime(path) < 86400:
+            with open(path) as fh:
+                return json.load(fh)
+    except (OSError, ValueError):
+        pass
+    rc, text = cli("countries", "list", timeout=60)
+    if rc != 0:
+        return []
+    rows = []
+    for line in text.splitlines():
+        cols = re.split(r"\s{2,}", line.strip())
+        if len(cols) == 2 and re.fullmatch(r"[A-Z]{2}", cols[1]):
+            rows.append({"name": cols[0], "code": cols[1]})
+    if rows:
+        os.makedirs(CACHE, exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(rows, fh)
+    return rows
+
+
+def action(*args):
+    rc, text = cli(*args, timeout=120)
+    emit({"ok": rc == 0, "message": tidy(text)})
+
+
+def signin():
+    if not shutil.which("protonvpn"):
+        print("protonvpn is not installed. Install it with: omarchy pkg add proton-vpn-cli")
+        return 1
+    try:
+        user = input("Proton username: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return 130
+    if not user:
+        return 1
+    return subprocess.call(["protonvpn", "signin", user])
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "state"
+    if cmd == "state":
+        emit(state())
+    elif cmd == "details":
+        emit(details())
+    elif cmd == "countries":
+        emit(countries())
+    elif cmd == "connect":
+        action("connect", *argv[2:])
+    elif cmd == "disconnect":
+        action("disconnect")
+    elif cmd == "set" and len(argv) == 4:
+        action("config", "set", argv[2], argv[3])
+    elif cmd == "signin":
+        return signin()
+    else:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "proton-vpn",
+  "name": "Proton VPN",
+  "version": "1.0.0",
+  "author": "loneycoffee",
+  "license": "MIT",
+  "homepage": "https://github.com/loneycoffee/omarchy-proton-vpn",
+  "description": "A shield on the bar for the official Proton VPN CLI: connect to the fastest server, a favorite country, a city, a server ID, Secure Core, P2P or Tor; see the server, its load and your exit IP; switch NetShield and the kill switch. Right click connects or disconnects. Toggle the panel with: omarchy-shell shell toggle proton-vpn",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Proton VPN",
+    "description": "Proton VPN status and quick connect",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "quickConnect": "",
+      "favorites": ["CH", "NL", "US", "JP"]
+    },
+    "schema": [
+      {
+        "key": "quickConnect",
+        "type": "string",
+        "label": "Right-click connects to (country code, city or server ID; empty for fastest)",
+        "defaultValue": ""
+      }
+    ]
+  }
+}
